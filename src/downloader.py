@@ -1,10 +1,11 @@
 """
-Downloads Twitch VODs using yt-dlp and chat logs using chat-downloader.
+Downloads Twitch VODs using yt-dlp and chat logs using the Twitch v5 API.
 """
 
 import os
 import json
 import subprocess
+import requests
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ def download_video(vod_id: str, vod_url: str) -> Path:
             "--output", str(out_path),
             "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
+            "--download-sections", "*0:00-0:10",  # TEST MODE: first 10 minutes only
             vod_url,
         ],
         check=True,
@@ -40,10 +42,10 @@ def download_video(vod_id: str, vod_url: str) -> Path:
     return out_path
 
 
-def download_chat(vod_id: str) -> Path:
+def download_chat(vod_id: str, client_id: str = None) -> Path:
     """
-    Downloads chat for a VOD using chat-downloader.
-    Returns path to the JSON chat file.
+    Downloads Twitch chat replay using the Twitch GQL API (paginated).
+    Returns path to the normalized JSON chat file.
     """
     out_dir = vod_dir(vod_id)
     out_path = out_dir / "chat.json"
@@ -54,18 +56,69 @@ def download_chat(vod_id: str) -> Path:
 
     print(f"[downloader] Downloading chat for VOD {vod_id}...")
 
-    from chat_downloader import ChatDownloader
-    url = f"https://www.twitch.tv/videos/{vod_id}"
-    downloader = ChatDownloader()
-    chat = downloader.get_chat(url)
+    GQL_URL = "https://gql.twitch.tv/gql"
+    # Public Twitch web client ID — used by browsers, required for GQL chat API
+    GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+    GQL_QUERY = """
+    query VideoCommentsByOffsetOrCursor($videoID: ID!, $contentOffsetSeconds: Int, $cursor: Cursor) {
+      video(id: $videoID) {
+        comments(contentOffsetSeconds: $contentOffsetSeconds, after: $cursor) {
+          edges {
+            cursor
+            node {
+              contentOffsetSeconds
+              message { fragments { text } }
+              commenter { displayName }
+            }
+          }
+          pageInfo { hasNextPage }
+        }
+      }
+    }
+    """
 
     messages = []
-    for msg in chat:
-        messages.append({
-            "time_in_seconds": msg.get("time_in_seconds", 0),
-            "message": msg.get("message", ""),
-            "author": msg.get("author", {}).get("name", ""),
-        })
+    cursor = None
+    page = 0
+
+    while True:
+        variables = {"videoID": vod_id, "contentOffsetSeconds": 0} if cursor is None \
+            else {"videoID": vod_id, "cursor": cursor}
+
+        resp = requests.post(
+            GQL_URL,
+            json={"query": GQL_QUERY, "variables": variables},
+            headers={"Client-ID": GQL_CLIENT_ID},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        comments_block = (
+            (data.get("data") or {})
+            .get("video") or {}
+        ).get("comments") or {}
+
+        edges = comments_block.get("edges") or []
+
+        for edge in edges:
+            node = edge.get("node") or {}
+            fragments = (node.get("message") or {}).get("fragments") or []
+            text = " ".join(f.get("text", "") for f in fragments)
+            messages.append({
+                "time_in_seconds": float(node.get("contentOffsetSeconds", 0)),
+                "message": text,
+                "author": (node.get("commenter") or {}).get("displayName", ""),
+            })
+
+        has_next = (comments_block.get("pageInfo") or {}).get("hasNextPage", False)
+        cursor = edges[-1]["cursor"] if has_next and edges else None
+
+        page += 1
+        if page % 50 == 0:
+            print(f"[downloader] ...{len(messages)} messages fetched")
+
+        if not cursor:
+            break
 
     with open(out_path, "w") as f:
         json.dump(messages, f)

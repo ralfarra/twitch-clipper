@@ -38,7 +38,7 @@ def run():
 
         try:
             video_path = download_video(vod_id, vod["url"])
-            chat_path = download_chat(vod_id)
+            chat_path = download_chat(vod_id, client_id)
 
             peaks = analyze(chat_path, top_n=10)
             if not peaks:
