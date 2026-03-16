@@ -1,0 +1,6 @@
+requests
+yt-dlp
+chat-downloader
+ffmpeg-python
+APScheduler
+python-dotenv
