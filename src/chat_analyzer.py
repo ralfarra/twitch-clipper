@@ -1,14 +1,16 @@
 """
-Analyzes chat messages to find the most exciting moments in a VOD.
+Analyzes chat messages to find the funniest/most exciting moments in a VOD.
 
 Scoring per time window:
-  - Message volume (weighted highest)
+  - Message volume (base score — chat going fast = something happening)
+  - Laugh emotes: KEKW, LUL, OMEGALUL, etc. (strongest signal for funny)
+  - "clip it" / "clip that" (chat explicitly asking to clip)
+  - Hype emotes: Pog, PogChamp, etc.
   - ALL CAPS ratio
   - Exclamation/question mark density
-  - Known hype emote count (PogChamp, KEKW, LUL, etc.)
-  - Hype keyword count (lets go, gg, omg, etc.)
 
-Returns top N peak timestamps with minimum spacing between them.
+Only peaks above a minimum score threshold are returned — if chat was
+quiet, no clip is produced for that moment.
 """
 
 import json
@@ -17,52 +19,77 @@ from collections import defaultdict
 from pathlib import Path
 
 
+# Strongest signal: chat is laughing
+LAUGH_EMOTES = {
+    "kekw", "lul", "lulw", "omegalul", "omegalmao", "lmao", "lmfao",
+    "😂", "💀", "pepelaugh", "peepolaughing", "kekleo", "gigachad",
+    "rofll", "hahaa", "bahahaha",
+}
+
+# Chat explicitly saying this is clip-worthy
+CLIP_SIGNALS = {
+    "clip it", "clip that", "clipable", "clippable", "someone clip",
+    "clip this", "highlight", "lmaooo", "lmaoo", "omg", "bro what",
+    "bro no", "no way", "no wayyy", "i cant", "i can't",
+}
+
+# General hype/excitement
 HYPE_EMOTES = {
-    "pogchamp", "pog", "poggers", "kekw", "lul", "omegalul",
-    "hype", "monkas", "pepelaugh", "peepolaughing", "pepehands",
-    "widepeeposad", "catjam", "peepogg", "copium", "ez",
+    "pogchamp", "pog", "poggers", "pogg", "hype", "monkas",
+    "pepehands", "widepeeposad", "catjam", "peepogg", "ez",
+    "copium", "sadge", "aware", "pepega",
 }
 
 HYPE_KEYWORDS = {
-    "lets go", "let's go", "letsgo", "gg", "omg", "wtf", "holy",
-    "insane", "crazy", "clip it", "clip that", "no way", "goat",
-    "actually", "bro", "sheesh",
+    "lets go", "let's go", "letsgo", "gg", "wtf", "holy",
+    "insane", "crazy", "goat", "sheesh", "actually", "real",
+    "bro", "dude", "cmon",
 }
 
-WINDOW_SIZE = 10      # seconds per scoring bucket
-SMOOTHING_RADIUS = 3  # buckets to smooth over (rolling average)
-MIN_PEAK_SPACING = 90 # seconds minimum gap between clips
+WINDOW_SIZE = 10       # seconds per scoring bucket
+SMOOTHING_RADIUS = 3   # buckets on each side for rolling average
+MIN_PEAK_SPACING = 120 # seconds minimum between clips (2 min buffer)
+MIN_SCORE = 30.0       # minimum score to produce a clip at all
 
 
 def score_message(msg: str) -> float:
-    """Returns an excitement score for a single message."""
-    score = 1.0  # base point for existing
-
+    """Returns a funny/excitement score for a single message."""
     text = msg.strip()
     if not text:
         return 0.0
 
-    # Caps ratio bonus
+    score = 1.0  # base: message exists
+    lower = text.lower()
+
+    # Laugh emotes — strongest signal (3x weight)
+    for emote in LAUGH_EMOTES:
+        if emote in lower:
+            score += 3.0
+
+    # "Clip it" signals — chat explicitly flagging the moment (2.5x)
+    for signal in CLIP_SIGNALS:
+        if signal in lower:
+            score += 2.5
+
+    # General hype emotes (1.5x)
+    for emote in HYPE_EMOTES:
+        if emote in lower:
+            score += 1.5
+
+    # Hype keywords (1x)
+    for kw in HYPE_KEYWORDS:
+        if kw in lower:
+            score += 1.0
+
+    # ALL CAPS bonus — caps = shouting = excited
     letters = [c for c in text if c.isalpha()]
     if letters:
         caps_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
-        score += caps_ratio * 1.5
+        score += caps_ratio * 2.0
 
     # Punctuation excitement
-    score += text.count("!") * 0.3
-    score += text.count("?") * 0.2
-
-    lower = text.lower()
-
-    # Hype emotes
-    for emote in HYPE_EMOTES:
-        if emote in lower:
-            score += 1.0
-
-    # Hype keywords
-    for kw in HYPE_KEYWORDS:
-        if kw in lower:
-            score += 0.8
+    score += min(text.count("!"), 5) * 0.4
+    score += min(text.count("?"), 3) * 0.2
 
     return score
 
@@ -91,7 +118,7 @@ def smooth(buckets: dict[int, float], max_bucket: int) -> list[float]:
 def find_peaks(smoothed: list[float], n: int) -> list[int]:
     """
     Returns indices of top N peaks with minimum spacing between them.
-    Each index is a bucket number (multiply by WINDOW_SIZE to get seconds).
+    Only includes peaks above MIN_SCORE threshold.
     """
     min_bucket_gap = math.ceil(MIN_PEAK_SPACING / WINDOW_SIZE)
     peaks = []
@@ -99,10 +126,9 @@ def find_peaks(smoothed: list[float], n: int) -> list[int]:
 
     while len(peaks) < n and remaining:
         best_idx, best_score = max(remaining, key=lambda x: x[1])
-        if best_score == 0:
+        if best_score < MIN_SCORE:
             break
         peaks.append(best_idx)
-        # Suppress buckets within min spacing
         remaining = [
             (i, s) for i, s in remaining
             if abs(i - best_idx) > min_bucket_gap
@@ -111,12 +137,12 @@ def find_peaks(smoothed: list[float], n: int) -> list[int]:
     return sorted(peaks)
 
 
-def analyze(chat_path: Path, top_n: int = 10) -> list[dict]:
+def analyze(chat_path: Path, top_n: int = 15) -> list[dict]:
     """
-    Analyzes a chat JSON file and returns top N peak moments.
+    Analyzes a chat JSON file and returns the top funny/exciting moments.
 
     Returns list of dicts:
-      { "timestamp": float (seconds), "score": float, "rank": int }
+      { "rank": int, "timestamp": float (seconds), "score": float }
     """
     with open(chat_path) as f:
         messages = json.load(f)

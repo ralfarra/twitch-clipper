@@ -40,7 +40,7 @@ def run():
             video_path = download_video(vod_id, vod["url"])
             chat_path = download_chat(vod_id, client_id)
 
-            peaks = analyze(chat_path, top_n=10)
+            peaks = analyze(chat_path, top_n=15)
             if not peaks:
                 print(f"[pipeline] No chat data to analyze for VOD {vod_id}, skipping clips.")
             else:
