@@ -1,22 +1,27 @@
 """
-Cuts 90-second clips from a VOD using ffmpeg, centered on peak timestamps.
+Cuts 90-second clips from a VOD using ffmpeg.
+
+Timing: chat reacts AFTER the funny moment, so we start 60s before the
+chat peak to capture the actual moment, and end 30s after to capture the
+reaction. This gives better context vs. centering on the peak.
 """
 
 import subprocess
 from pathlib import Path
 
 
-CLIP_DURATION = 90   # seconds
-HALF = CLIP_DURATION // 2
+CLIP_DURATION = 90     # seconds total
+LEAD_IN = 60           # seconds before chat peak (capture the moment)
+LEAD_OUT = 30          # seconds after chat peak (capture the reaction)
 
 
 def clip_video(video_path: Path, timestamp: float, rank: int, out_dir: Path) -> Path:
     """
-    Cuts a 90-second clip centered on `timestamp` from `video_path`.
+    Cuts a 90-second clip starting 60s before `timestamp` from `video_path`.
     Returns path to the output clip file.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    start = max(0, timestamp - HALF)
+    start = max(0, timestamp - LEAD_IN)
     out_path = out_dir / f"clip_{rank:02d}_t{int(timestamp)}s.mp4"
 
     if out_path.exists():

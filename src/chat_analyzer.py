@@ -2,8 +2,7 @@
 Analyzes chat messages to find the funniest/most exciting moments in a VOD.
 
 Key behaviors:
-  - Detects when the streamer actually starts (chat rate jumps) and skips
-    the pre-stream waiting screen entirely
+  - Always skips the first 15 minutes (waiting screen before stream starts)
   - Scores windows heavily on laugh emotes, "clip it" signals, and caps bursts
   - Returns the top N funniest moments spread across the FULL stream,
     each at least 2 minutes apart
@@ -45,46 +44,7 @@ SMOOTHING_RADIUS = 3    # rolling average radius in buckets
 MIN_PEAK_SPACING = 120  # seconds between clips (2 min buffer)
 MIN_SCORE = 30.0        # minimum score to produce a clip
 
-# Stream start detection: minimum messages per minute to consider "live"
-STREAM_START_MSG_RATE = 15   # msgs/min threshold
-STREAM_START_SUSTAINED = 3   # consecutive minutes above threshold
-
-
-def detect_stream_start(messages: list[dict]) -> float:
-    """
-    Returns the timestamp (seconds) when the streamer actually started.
-    Looks for the first sustained period of high chat activity.
-    Skips the pre-stream waiting screen which has low/flat activity.
-    """
-    if not messages:
-        return 0.0
-
-    # Count messages per minute
-    msgs_per_minute: dict[int, int] = defaultdict(int)
-    for msg in messages:
-        minute = int(msg.get("time_in_seconds", 0) // 60)
-        msgs_per_minute[minute] += 1
-
-    if not msgs_per_minute:
-        return 0.0
-
-    max_minute = max(msgs_per_minute.keys())
-
-    # Find first run of STREAM_START_SUSTAINED consecutive minutes all above threshold
-    consecutive = 0
-    for minute in range(max_minute + 1):
-        if msgs_per_minute.get(minute, 0) >= STREAM_START_MSG_RATE:
-            consecutive += 1
-            if consecutive >= STREAM_START_SUSTAINED:
-                # Stream started STREAM_START_SUSTAINED minutes ago
-                start_minute = minute - STREAM_START_SUSTAINED + 1
-                # Give a small buffer before the detected start
-                return max(0.0, (start_minute - 1) * 60.0)
-        else:
-            consecutive = 0
-
-    # Fallback: if no clear start found, skip nothing
-    return 0.0
+SKIP_FIRST_SECONDS = 15 * 60  # always skip first 15 minutes (waiting screen)
 
 
 def score_message(msg: str) -> float:
@@ -188,16 +148,14 @@ def analyze(chat_path: Path, top_n: int = 15) -> list[dict]:
     if not messages:
         return []
 
-    stream_start = detect_stream_start(messages)
-    print(f"[analyzer] Detected stream start at t={stream_start:.0f}s ({stream_start/60:.1f} min)")
-
-    buckets = bucket_scores(messages, skip_before=stream_start)
+    print(f"[analyzer] Skipping first {SKIP_FIRST_SECONDS // 60} minutes (waiting screen)")
+    buckets = bucket_scores(messages, skip_before=SKIP_FIRST_SECONDS)
     if not buckets:
         return []
 
     max_bucket = max(buckets.keys(), default=0)
     smoothed = smooth(buckets, max_bucket)
-    skip_before_bucket = int(stream_start // WINDOW_SIZE)
+    skip_before_bucket = int(SKIP_FIRST_SECONDS // WINDOW_SIZE)
     peak_buckets = find_peaks(smoothed, top_n, skip_before_bucket)
 
     results = []
